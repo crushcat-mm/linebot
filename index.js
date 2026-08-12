@@ -6,17 +6,17 @@ const path = require ('path');
 const app = express();
 app.use(express.json());
 
-// ========== 管理員 ID 清單，兩組都擁有管理員指令權限 ==========
+// ========== 管理員 ID 清單 ==========
 const ADMIN_USER_LIST = [
 "Ubd8313c23ee1aaf9f794042649c176fe",
 "Ua25feb59dc428d5bdb78f0d44192dcd3"
 ];
-let globalAiSwitch = true; // 全域 AI 開關，容器重啟會恢復 true
+let globalAiSwitch = true;
 
-// ========== 以 UID 隔離的 RAM 記憶，伺服器重啟全部清空 ==========
+// 使用者對話記憶
 const chatMemory = {};
 
-// ========== 讀取外部 System Prompt ==========
+// ========== 讀取 System Prompt ==========
 let systemPrompt;
 try {
 systemPrompt = fs.readFileSync (
@@ -28,13 +28,13 @@ console.warn ("無法載入 prompts/customer.txt，使用內建備用 prompt", e
 systemPrompt = "你是萌爪貓坊的專業線上客服，態度親切有禮，使用繁體中文簡潔回覆客人關於貓咪品種、預約、飼養須知、等相關問題。回答不要過長。";
 }
 
-// ========== Agnes AI 接口配置 ==========
+// ========== Agnes AI 客戶端 ==========
 const aiClient = new OpenAI ({
 apiKey: process.env.OPENAI_API_KEY,
 baseURL: "https://apihub.agnes-ai.com/v1"
 });
 
-// 封裝：通知全部管理員
+// 封裝：通知全部管理員【完全保留，不做任何修改】
 async function notifyAdmins(lineClient, userId, userRawText){
     for(const adminUid of ADMIN_USER_LIST){
         try{
@@ -48,25 +48,24 @@ async function notifyAdmins(lineClient, userId, userRawText){
     }
 }
 
-// ========== LINE Webhook 入口 ==========
+// ========== LINE Webhook ==========
 app.post ('/callback', async (req, res) => {
 res.status (200).end ();
 const events = req.body.events;
 if (!events || events.length === 0) return;
 const event = events [0];
-// ✅完整輸出全部事件資訊到 logs
 console.log ("==== 完整事件資訊 ====", JSON.stringify (event,null,2));
 const userId = event.source.userId;
 
-// 管理員 #指令處理（嚴格比對 #暫停/#開始）
+// 管理員指令區
 if (event.type === 'message' && event.message.type === 'text'){
 const msg = event.message.text.trim ();
-// 判斷：# 開頭，且 userId 存在管理員清單內
 if (msg.startsWith ('#') && ADMIN_USER_LIST.includes (userId)){
 const lineClient = new line.Client ({
 channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 channelSecret: process.env.LINE_CHANNEL_SECRET
 });
+
 if (msg === '#暫停'){
 globalAiSwitch = false;
 try {
@@ -77,6 +76,7 @@ text:"✅已全域關閉 AI 自動回覆，所有人交由人工處理。容器�
 } catch (e){console.error ("push 訊息失敗",e)}
 return;
 }
+
 if (msg === '#開始'){
 globalAiSwitch = true;
 try {
@@ -87,10 +87,25 @@ text:"✅已開啟 AI 自動回覆。"
 } catch (e){console.error ("push 訊息失敗",e)}
 return;
 }
+
+// 新增 #重啟：清空本次開機累積所有聊天記憶
+if (msg === '#重啟'){
+    const oldCount = Object.keys(chatMemory).length;
+    // 釋放記憶，重置空物件
+    chatMemory = {};
+    try {
+        await lineClient.pushMessage(userId,{
+            type:"text",
+            text:`✅聊天記憶已全部清空\n本次開機累計使用者紀錄數：${oldCount}\n伺服器本身不會重啟，僅重置對話緩存`
+        })
+    }catch(e){console.error("push 訊息失敗",e)}
+    return;
+}
+
 }
 }
 
-// 全域開關判斷，關閉就直接結束，不跑 AI
+// AI開關關閉直接結束
 if (globalAiSwitch !== true){
 return;
 }
@@ -102,7 +117,7 @@ channelSecret: process.env.LINE_CHANNEL_SECRET
 });
 const userText = event.message.text;
 
-// 處理該使用者的聊天記憶，按 UID 分開
+// 存入使用者訊息記憶
 if (!chatMemory [userId]){
 chatMemory [userId] = [];
 }
@@ -113,7 +128,7 @@ const aiResponse = await aiClient.chat.completions.create ({
 model: "agnes-2.5-flash",
 messages: [
 {role: "system", content: systemPrompt},
-...chatMemory [userId] // 把該使用者全部歷史一起送給 AI
+...chatMemory [userId]
 ],
 temperature: 0.3
 });
@@ -123,18 +138,14 @@ const rawAiOutput = aiResponse.choices [0]?.message?.content?.trim ()
 
 console.log("【AI原始輸出】", JSON.stringify(rawAiOutput));
 
-// -------- 觸發標籤處理邏輯 --------
+// 觸發移交通知判斷
 let finalUserText = rawAiOutput;
 if(rawAiOutput.includes("<<trigger_admin_alert>>")){
     console.log("偵測到trigger_admin_alert，通知管理員");
-    // 發送通知給管理員
     await notifyAdmins(lineClient, userId, userText);
-    // 移除標籤，不要讓使用者看到
     finalUserText = finalUserText.replaceAll("<<trigger_admin_alert>>","").trim();
 }
-// --------------------------------
 
-// 把清理完標籤的內容存入記憶
 chatMemory [userId].push ({role:"assistant", content: finalUserText});
 
 await lineClient.replyMessage(event.replyToken, {
