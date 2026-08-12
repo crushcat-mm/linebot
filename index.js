@@ -86,7 +86,7 @@ chatMemory [userId] = [];
 chatMemory [userId].push ({role:"user", content: userText});
 try {
 const aiResponse = await aiClient.chat.completions.create ({
-model: "agnes-2.5-pro-alpha",
+model: "agnes-2.5-flash",
 messages: [
 {role: "system", content: systemPrompt},
 ...chatMemory [userId] // 把該使用者全部歷史一起送給 AI
