@@ -58,7 +58,7 @@ const event = events [0];
 console.log ("==== 完整事件資訊 ====", JSON.stringify (event,null,2));
 const userId = event.source.userId;
 
-// 管理員 #指令處理（嚴格比對 #暫停/ #開始）
+// 管理員 #指令處理（嚴格比對 #暫停/#開始）
 if (event.type === 'message' && event.message.type === 'text'){
 const msg = event.message.text.trim ();
 // 判斷：# 開頭，且 userId 存在管理員清單內
@@ -67,7 +67,7 @@ const lineClient = new line.Client ({
 channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 channelSecret: process.env.LINE_CHANNEL_SECRET
 });
-if (msg === '# 暫停 '){
+if (msg === '#暫停'){
 globalAiSwitch = false;
 try {
 await lineClient.pushMessage (userId, {
@@ -77,7 +77,7 @@ text:"✅已全域關閉 AI 自動回覆，所有人交由人工處理。容器�
 } catch (e){console.error ("push 訊息失敗",e)}
 return;
 }
-if (msg === '# 開始 '){
+if (msg === '#開始'){
 globalAiSwitch = true;
 try {
 await lineClient.pushMessage (userId, {
