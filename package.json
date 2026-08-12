@@ -2,7 +2,7 @@
   "name": "linebot‑agnes",
   "version": "1.0.0",
   "dependencies": {
-    "@line/bot‑sdk": "^9.4.0",
+    "@line/bot-sdk": "^9.4.0",
     "express": "^4.21.0",
     "openai": "^4.85.0"
   },
