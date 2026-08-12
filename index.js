@@ -33,6 +33,10 @@ app.post('/callback', async (req, res) => {
   if (!events || events.length === 0) return;
 
   const event = events[0];
+
+  // ✅只做這件事：把使用者userId印到Render日誌
+  console.log("===使用者UserId===", event.source.userId);
+
   if (event.type !== 'message' || event.message.type !== 'text') return;
 
   const lineClient = new line.Client({
