@@ -5,14 +5,17 @@ const fs = require ('fs');
 const path = require ('path');
 const app = express();
 app.use(express.json());
+
 // ========== 管理員 ID 清單，兩組都擁有管理員指令權限 ==========
 const ADMIN_USER_LIST = [
 "Ubd8313c23ee1aaf9f794042649c176fe",
 "Ua25feb59dc428d5bdb78f0d44192dcd3"
 ];
 let globalAiSwitch = true; // 全域 AI 開關，容器重啟會恢復 true
-// ========== 新增：以 UID 隔離的 RAM 記憶，伺服器重啟全部清空 ==========
+
+// ========== 以 UID 隔離的 RAM 記憶，伺服器重啟全部清空 ==========
 const chatMemory = {};
+
 // ========== 讀取外部 System Prompt ==========
 let systemPrompt;
 try {
@@ -24,11 +27,27 @@ path.join (__dirname, './prompts/customer.txt'),
 console.warn ("無法載入 prompts/customer.txt，使用內建備用 prompt", err.message);
 systemPrompt = "你是萌爪貓坊的專業線上客服，態度親切有禮，使用繁體中文簡潔回覆客人關於貓咪品種、預約、飼養須知、等相關問題。回答不要過長。";
 }
+
 // ========== Agnes AI 接口配置 ==========
 const aiClient = new OpenAI ({
 apiKey: process.env.OPENAI_API_KEY,
 baseURL: "https://apihub.agnes-ai.com/v1"
 });
+
+// 封裝：通知全部管理員
+async function notifyAdmins(lineClient, userId, userRawText){
+    for(const adminUid of ADMIN_USER_LIST){
+        try{
+            await lineClient.pushMessage(adminUid,{
+                type:"text",
+                text:`🔔AI觸發移交真人\n使用者UID：${userId}\n使用者訊息：${userRawText}`
+            })
+        }catch(e){
+            console.error("管理員推播失敗 adminUid=",adminUid,e);
+        }
+    }
+}
+
 // ========== LINE Webhook 入口 ==========
 app.post ('/callback', async (req, res) => {
 res.status (200).end ();
@@ -38,6 +57,7 @@ const event = events [0];
 // ✅完整輸出全部事件資訊到 logs
 console.log ("==== 完整事件資訊 ====", JSON.stringify (event,null,2));
 const userId = event.source.userId;
+
 // 管理員 #指令處理（嚴格比對 #暫停 / #開始）
 if (event.type === 'message' && event.message.type === 'text'){
 const msg = event.message.text.trim ();
@@ -69,21 +89,25 @@ return;
 }
 }
 }
+
 // 全域開關判斷，關閉就直接結束，不跑 AI
 if (globalAiSwitch !== true){
 return;
 }
 if (event.type !== 'message' || event.message.type !== 'text') return;
+
 const lineClient = new line.Client({
 channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 channelSecret: process.env.LINE_CHANNEL_SECRET
 });
 const userText = event.message.text;
+
 // 處理該使用者的聊天記憶，按 UID 分開
 if (!chatMemory [userId]){
 chatMemory [userId] = [];
 }
 chatMemory [userId].push ({role:"user", content: userText});
+
 try {
 const aiResponse = await aiClient.chat.completions.create ({
 model: "agnes-2.5-flash",
@@ -93,14 +117,31 @@ messages: [
 ],
 temperature: 0.3
 });
-const replyContent = aiResponse.choices [0]?.message?.content?.trim ()
+
+const rawAiOutput = aiResponse.choices [0]?.message?.content?.trim ()
 || "很抱歉，目前無法處理您的問題，請稍後再嘗試。";
-// 把 AI 回覆存入記憶，下一輪可以讀取
-chatMemory [userId].push ({role:"assistant", content: replyContent});
+
+console.log("【AI原始輸出】", JSON.stringify(rawAiOutput));
+
+// -------- 觸發標籤處理邏輯 --------
+let finalUserText = rawAiOutput;
+if(rawAiOutput.includes("<<trigger_admin_alert>>")){
+    console.log("偵測到trigger_admin_alert，通知管理員");
+    // 發送通知給管理員
+    await notifyAdmins(lineClient, userId, userText);
+    // 移除標籤，不要讓使用者看到
+    finalUserText = finalUserText.replaceAll("<<trigger_admin_alert>>","").trim();
+}
+// --------------------------------
+
+// 把清理完標籤的內容存入記憶
+chatMemory [userId].push ({role:"assistant", content: finalUserText});
+
 await lineClient.replyMessage(event.replyToken, {
 type: "text",
-text: replyContent
+text: finalUserText
 });
+
 } catch (error) {
 console.error ("AI 回覆異常:", error);
 try {
@@ -113,6 +154,7 @@ console.error ("錯誤提示發送失敗:", replyErr);
 }
 }
 });
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
 console.log(`貓坊客服機器人已啟動，運行端口: ${PORT}`);
