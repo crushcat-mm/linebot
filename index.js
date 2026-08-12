@@ -109,11 +109,36 @@ app.post('/callback', async (req, res) => {
       temperature: 0.3
     });
 
-    const replyContent = aiResponse.choices[0]?.message?.content?.trim()
+    let replyContent = aiResponse.choices[0]?.message?.content?.trim()
       || "很抱歉，目前無法處理您的問題，請稍後再嘗試。";
 
-    // 把AI回覆存入記憶，下一輪可以讀取
+    // ---------------------- 新增：偵測觸發管理員警報標記 ----------------------
+    const TRIGGER_MARKER = "<<trigger_admin_alert>>";
+    let needAlertAdmin = false;
+    if(replyContent.startsWith(TRIGGER_MARKER)){
+      needAlertAdmin = true;
+      // 剝掉標籤，給使用者看的文字要乾淨
+      replyContent = replyContent.slice(TRIGGER_MARKER.length).trim();
+    }
+
+    // 把AI回覆存入記憶（存剝掉標籤之後的內容）
     chatMemory[userId].push({role:"assistant", content: replyContent});
+
+    // 如果需要通知管理員，推播給全部ADMIN_USER_LIST
+    if(needAlertAdmin){
+      const alertText = `⚠️客服觸發強制管理員介入\n使用者UID:${userId}\n使用者訊息:${userText}`;
+      for(const adminUid of ADMIN_USER_LIST){
+        try{
+          await lineClient.pushMessage(adminUid, {
+            type:"text",
+            text: alertText
+          });
+        }catch(err){
+          console.error("推播通知管理員失敗 uid:"+adminUid, err);
+        }
+      }
+    }
+    // ---------------------------------------------------------------------------
 
     await lineClient.replyMessage(event.replyToken, {
       type: "text",
