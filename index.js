@@ -58,7 +58,7 @@ const event = events [0];
 console.log ("==== 完整事件資訊 ====", JSON.stringify (event,null,2));
 const userId = event.source.userId;
 
-// 管理員 #指令處理（嚴格比對 #暫停 / #開始）
+// 管理員 #指令處理（嚴格比對 #暫停/ #開始）
 if (event.type === 'message' && event.message.type === 'text'){
 const msg = event.message.text.trim ();
 // 判斷：# 開頭，且 userId 存在管理員清單內
