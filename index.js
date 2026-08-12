@@ -5,10 +5,10 @@ const line = require('@line/bot-sdk');
 const app = express();
 app.use(express.json());
 
-// ========== Agnes 設定，這裡改你的 Agnes API位址 ==========
+// Agnes 設定
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  baseURL: "https://填入Agnes給你的位址/v1" // ⚠️務必替換成真實endpoint
+  baseURL: "https://apihub.agnes-ai.com/v1"
 });
 
 const lineConfig = {
@@ -25,9 +25,9 @@ app.post('/callback', async (req, res) => {
   const userText = event.message.text;
   try {
     const aiRes = await openai.chat.completions.create({
-      model: "gpt‑3.5‑turbo", // ⚠️依照Agnes可用模型修改
+      model: "agnes-2.5-flash",
       messages: [
-        {role:"system", content:"你是萌爪貓坊客服，禮貌簡短回覆使用者問題。"},
+        {role:"system", content:"你是萌爪貓坊客服(AI)，禮貌簡短回覆使用者問題。"},
         {role:"user", content: userText}
       ],
       temperature:0.7
