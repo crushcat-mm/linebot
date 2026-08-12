@@ -14,6 +14,9 @@ const ADMIN_USER_LIST = [
 ];
 let globalAiSwitch = true; // 全域AI開關，容器重啟會恢復true
 
+// ========== 新增：以UID隔離的RAM記憶，伺服器重啟全部清空 ==========
+const chatMemory = {};
+
 // ========== 讀取外部 System Prompt ==========
 let systemPrompt;
 try {
@@ -44,7 +47,7 @@ app.post('/callback', async (req, res) => {
   console.log("====完整事件資訊====", JSON.stringify(event,null,2));
   const userId = event.source.userId;
 
-  // 管理員 #指令處理
+  // 管理員 #指令處理（嚴格比對 #暫停 / #開始）
   if(event.type === 'message' && event.message.type === 'text'){
     const msg = event.message.text.trim();
     // 判斷：#開頭，且userId存在管理員清單內
@@ -53,7 +56,7 @@ app.post('/callback', async (req, res) => {
         channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
         channelSecret: process.env.LINE_CHANNEL_SECRET
       });
-      if(msg === '#ai_off'){
+      if(msg === '#暫停'){
         globalAiSwitch = false;
         try{
           await lineClient.pushMessage(userId, {
@@ -63,7 +66,7 @@ app.post('/callback', async (req, res) => {
         }catch(e){console.error("push訊息失敗",e)}
         return;
       }
-      if(msg === '#ai_on'){
+      if(msg === '#開始'){
         globalAiSwitch = true;
         try{
           await lineClient.pushMessage(userId, {
@@ -90,24 +93,27 @@ app.post('/callback', async (req, res) => {
 
   const userText = event.message.text;
 
+  // 處理該使用者的聊天記憶，按UID分開
+  if(!chatMemory[userId]){
+    chatMemory[userId] = [];
+  }
+  chatMemory[userId].push({role:"user", content: userText});
+
   try {
     const aiResponse = await aiClient.chat.completions.create({
       model: "agnes-2.5-flash",
       messages: [
-        {
-          role: "system",
-          content: systemPrompt
-        },
-        {
-          role: "user",
-          content: userText
-        }
+        {role: "system", content: systemPrompt},
+        ...chatMemory[userId] // 把該使用者全部歷史一起送給AI
       ],
       temperature: 0.3
     });
 
     const replyContent = aiResponse.choices[0]?.message?.content?.trim()
       || "很抱歉，目前無法處理您的問題，請稍後再嘗試。";
+
+    // 把AI回覆存入記憶，下一輪可以讀取
+    chatMemory[userId].push({role:"assistant", content: replyContent});
 
     await lineClient.replyMessage(event.replyToken, {
       type: "text",
