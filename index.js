@@ -33,7 +33,7 @@ const TRIGGER_MARKER = "<<trigger_admin_alert>>";
 //讀取同資料夾 customer.txt，你的index在src/，txt也要丟src/
 let systemPrompt;
 try {
-  systemPrompt = fs.readFileSync(path.join(__dirname,"customer.txt"),"utf8");
+  systemPrompt = fs.readFileSync(path.join(__dirname,"prompts","customer.txt"),"utf8");
 }catch(e){
   console.error("讀取customer.txt失敗:",e);
   systemPrompt = "你是萌爪貓坊客服";
