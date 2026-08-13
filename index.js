@@ -16,16 +16,31 @@ let globalAiSwitch = true;
 // 使用者對話記憶
 const chatMemory = {};
 
-// ========== 讀取 System Prompt ==========
-let systemPrompt;
+// ========== 讀取prompts資料夾下全部TXT，單檔失敗直接跳過，不影響其他檔案 ==========
+let systemPrompt = "";
+const promptDir = path.join(__dirname, './prompts');
 try {
-systemPrompt = fs.readFileSync (
-path.join (__dirname, './prompts/customer.txt'),
-'utf8'
-);
+    const fileList = fs.readdirSync(promptDir);
+    const txtFiles = fileList.filter(f => path.extname(f).toLowerCase() === '.txt');
+
+    for(const filename of txtFiles){
+        const fullPath = path.join(promptDir, filename);
+        try{
+            const content = fs.readFileSync(fullPath, 'utf8');
+            systemPrompt += `\n===== ${filename} =====\n${content}\n`;
+            console.log(`已載入prompt檔案: ${filename}`);
+        }catch(errRead){
+            console.warn(`⚠️跳過檔案 ${filename}，讀取失敗:`, errRead.message);
+        }
+    }
+
+    if(systemPrompt.trim() === ""){
+        throw new Error("prompts資料夾沒有讀取到任何有效的txt內容");
+    }
+
 } catch (err) {
-console.warn ("無法載入 prompts/customer.txt，使用內建備用 prompt", err.message);
-systemPrompt = "你是萌爪貓坊的專業線上客服，態度親切有禮，使用繁體中文簡潔回覆客人關於貓咪品種、預約、飼養須知、等相關問題。回答不要過長。";
+    console.warn ("無法存取prompts資料夾，使用內建備用 prompt", err.message);
+    systemPrompt = "你是萌爪貓坊的專業線上客服，態度親切有禮，使用繁體中文簡潔回覆客人關於貓咪品種、預約、飼養須知、等相關問題。回答不要過長。";
 }
 
 // ========== Agnes AI 客戶端 ==========
@@ -91,12 +106,11 @@ return;
 // 新增 #重啟：清空本次開機累積所有聊天記憶
 if (msg === '#重啟'){
     const oldCount = Object.keys(chatMemory).length;
-    // 釋放記憶，重置空物件
     chatMemory = {};
     try {
         await lineClient.pushMessage(userId,{
             type:"text",
-            text:`✅聊天記憶已全部清空\n本次開機累計使用者紀錄數：${oldCount}\n伺服器本身不會重啟，僅重置對話緩存`
+            text:`✅聊天記憶已全部清空\n本次開機累計使用者紀錄數：${oldCount}\n伺服器本身不會重啟，僅重置對話緩存\n⚠️注意：prompts資料夾的txt修改，需要重啟伺服器才會生效`
         })
     }catch(e){console.error("push 訊息失敗",e)}
     return;
