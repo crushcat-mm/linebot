@@ -139,7 +139,7 @@ chatMemory [userId].push ({role:"user", content: userText});
 
 try {
 const aiResponse = await aiClient.chat.completions.create ({
-model: "agnes-2.5-flash",
+model: "agnes-2.5-pro-alpha",
 messages: [
 {role: "system", content: systemPrompt},
 ...chatMemory [userId]
