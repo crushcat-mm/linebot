@@ -43,13 +43,13 @@ try {
   systemPrompt = "你是萌爪貓坊的專業線上客服，態度親切有禮，使用繁體中文簡潔回覆客人關於貓咪品種、預約、飼養須知、等相關問題。回答不要過長。";
 }
 
-// ========== Agnes AI 客戶端（使用B的正確baseURL） ==========
+// ========== Agnes AI 客戶端 ==========
 const aiClient = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: "https://apihub.agnes-ai.com/v1"
 });
 
-// 封裝：通知全部管理員（A版本 MessagingApiClient 格式）
+// 封裝：通知全部管理員
 async function notifyAdmins(lineClient, userId, userRawText) {
   for (const adminUid of ADMIN_USER_LIST) {
     try {
@@ -147,29 +147,43 @@ app.post('/callback', async (req, res) => {
   }
 
   try {
-    // 💡 自動多模型分流策略
-    let selectedModel = "Agnes-2.5-Flash"; 
+    // 💡 自動多模型分流【全部小寫正確model id】
+    let selectedModel = "agnes-2.5-flash"; 
     
     if (userText.length > 150 || chatMemory[userId].length >= 14) {
-      selectedModel = "Agnes-2.5-Pro";
+      selectedModel = "agnes-2.5-pro-alpha";
       console.log(`[🚀 模型自動升級] 偵測到複雜對話，此輪由 ${selectedModel} 為您服務。`);
     } else {
       console.log(`[⚡ 快速模式] 使用標準模型: ${selectedModel}`);
     }
 
-    const aiResponse = await aiClient.chat.completions.create({
-      model: selectedModel,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...chatMemory[userId]
-      ],
-      temperature: 0.3
-    });
+    let aiResponse;
+    try{
+      aiResponse = await aiClient.chat.completions.create({
+        model: selectedModel,
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...chatMemory[userId]
+        ],
+        temperature: 0.3
+      });
+    }catch(modelErr){
+      // 主模型失敗，強制降級到 flash
+      console.warn(`⚠️模型 ${selectedModel} 呼叫失敗，自動降級至 agnes‑2.5‑flash`, modelErr.message);
+      aiResponse = await aiClient.chat.completions.create({
+        model: "agnes-2.5-flash",
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...chatMemory[userId]
+        ],
+        temperature: 0.3
+      });
+    }
 
     const rawAiOutput = aiResponse.choices[0]?.message?.content?.trim()
       || "很抱歉，目前無法處理您的問題，請稍後再嘗試。";
 
-    console.log(`【AI原始輸出 - 來自 ${selectedModel}】`, JSON.stringify(rawAiOutput));
+    console.log(`【AI原始輸出 - 來自 ${aiResponse.model}】`, JSON.stringify(rawAiOutput));
 
     // 觸發移交通知判斷
     let finalUserText = rawAiOutput;
