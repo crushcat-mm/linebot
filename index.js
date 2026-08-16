@@ -148,7 +148,7 @@ app.post('/callback', async (req, res) => {
 
   try {
     // 💡 自動多模型分流【全部小寫正確model id】
-    let selectedModel = "agnes-2.5-flash"; 
+    let selectedModel = "agnes-2.5-pro-alpha"; 
     
     if (userText.length > 150 || chatMemory[userId].length >= 14) {
       selectedModel = "agnes-2.5-pro-alpha";
