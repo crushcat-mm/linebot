@@ -86,7 +86,7 @@ function shouldTriggerAdminAlert(rawAiOutput) {
 }
 
 // ========== 完整句子截斷：避免回覆過長 ==========
-function truncateToCompleteSentence(text, maxChars = 120, hardLimit = 150) {
+function truncateToCompleteSentence(text, maxChars = 220, hardLimit = 350) {
   if (!text || text.length <= maxChars) return text;
   // 從 maxChars 開始找第一個句末標點（。！？!?），在標點後截斷
   const punctuation = /[。！？!?]/;
