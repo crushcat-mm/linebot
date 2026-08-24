@@ -66,6 +66,56 @@ async function notifyAdmins(lineClient, userId, userRawText) {
   }
 }
 
+// ========== 四層防禦：移交通知判斷 ==========
+function shouldTriggerAdminAlert(rawAiOutput) {
+  // 第二層：明確標記比對
+  if (rawAiOutput.includes("<<trigger_admin_alert>>")) {
+    return { triggered: true, reason: "標記觸發", stripMarker: true };
+  }
+
+  const text = rawAiOutput.toLowerCase();
+
+  // 第三層：組合關鍵字兜底（必須同時命中兩個正則，避免單詞誤觸發）
+  const patterns = [
+    [/通知/, /真人|小編|客服|專人|人員/],
+    [/已為您|已經幫您|幫您|已幫您/, /通知|轉交|移交|安排|聯繫/],
+    [/稍後|等等|很快|隨後|一會兒/, /聯繫|回覆|有人|人員|跟您|找您/],
+    [/馬上|立刻|立即|趕快|這就/, /有人|小編|真人|專人|客服|人員/],
+    [/為您.*轉|幫您.*轉/, /真人|小編|客服|專人/],
+  ];
+
+  for (const [p1, p2] of patterns) {
+    if (p1.test(text) && p2.test(text)) {
+      return { triggered: true, reason: "關鍵字組合觸發", stripMarker: false };
+    }
+  }
+
+  return { triggered: false, reason: "", stripMarker: false };
+}
+
+// ========== 完整句子截斷：避免回覆過長 ==========
+function truncateToCompleteSentence(text, maxChars = 120, hardLimit = 150) {
+  if (!text || text.length <= maxChars) return text;
+
+  // 從 maxChars 開始找第一個句末標點（。！？!?），在標點後截斷
+  const punctuation = /[。！？!?]/;
+  let cutIndex = -1;
+  const searchEnd = Math.min(text.length, hardLimit);
+  for (let i = maxChars; i < searchEnd; i++) {
+    if (punctuation.test(text[i])) {
+      cutIndex = i + 1;
+      break;
+    }
+  }
+
+  if (cutIndex === -1) {
+    // 找不到標點，在 hardLimit 處硬截斷
+    cutIndex = Math.min(text.length, hardLimit);
+  }
+
+  return text.slice(0, cutIndex).trim() + "…";
+}
+
 // ========== LINE Webhook ==========
 app.post('/callback', async (req, res) => {
   const events = req.body.events;
@@ -165,7 +215,8 @@ app.post('/callback', async (req, res) => {
           { role: "system", content: systemPrompt },
           ...chatMemory[userId]
         ],
-        temperature: 0.3
+        temperature: 0.3,
+        max_tokens: 350
       });
     }catch(modelErr){
       // 主模型失敗，強制降級到 flash
@@ -176,7 +227,8 @@ app.post('/callback', async (req, res) => {
           { role: "system", content: systemPrompt },
           ...chatMemory[userId]
         ],
-        temperature: 0.3
+        temperature: 0.3,
+        max_tokens: 350
       });
     }
 
@@ -185,13 +237,19 @@ app.post('/callback', async (req, res) => {
 
     console.log(`【AI原始輸出 - 來自 ${aiResponse.model}】`, JSON.stringify(rawAiOutput));
 
-    // 觸發移交通知判斷
+    // 四層防禦：觸發移交通知判斷
     let finalUserText = rawAiOutput;
-    if (rawAiOutput.includes("<<trigger_admin_alert>>")) {
-      console.log("偵測到trigger_admin_alert，通知管理員");
+    const alertResult = shouldTriggerAdminAlert(rawAiOutput);
+    if (alertResult.triggered) {
+      console.log(`偵測到移交通知 [${alertResult.reason}]，通知管理員`);
       await notifyAdmins(lineClient, userId, userText);
-      finalUserText = finalUserText.replaceAll("<<trigger_admin_alert>>", "").trim();
+      if (alertResult.stripMarker) {
+        finalUserText = finalUserText.replaceAll("<<trigger_admin_alert>>", "").trim();
+      }
     }
+
+    // 長度控制：超過120字在完整句子處截斷
+    finalUserText = truncateToCompleteSentence(finalUserText);
 
     chatMemory[userId].push({ role: "assistant", content: finalUserText });
 
