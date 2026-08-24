@@ -198,10 +198,10 @@ app.post('/callback', async (req, res) => {
 
   try {
     // 💡 自動多模型分流【全部小寫正確model id】
-    let selectedModel = "agnes-2.5-pro-alpha"; 
+    let selectedModel = "agnes‑2.5‑flash"; 
     
     if (userText.length > 150 || chatMemory[userId].length >= 14) {
-      selectedModel = "agnes-2.5-pro-alpha";
+      selectedModel = "agnes‑2.5‑flash";
       console.log(`[🚀 模型自動升級] 偵測到複雜對話，此輪由 ${selectedModel} 為您服務。`);
     } else {
       console.log(`[⚡ 快速模式] 使用標準模型: ${selectedModel}`);
