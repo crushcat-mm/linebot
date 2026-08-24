@@ -198,10 +198,10 @@ app.post('/callback', async (req, res) => {
 
   try {
     // 💡 自動多模型分流【全部小寫正確model id】
-    let selectedModel = "agnes‑2.5‑flash"; 
+    let selectedModel = "agnes-2.5-flash"; 
     
     if (userText.length > 150 || chatMemory[userId].length >= 14) {
-      selectedModel = "agnes‑2.5‑flash";
+      selectedModel = "agnes-2.5-flash";
       console.log(`[🚀 模型自動升級] 偵測到複雜對話，此輪由 ${selectedModel} 為您服務。`);
     } else {
       console.log(`[⚡ 快速模式] 使用標準模型: ${selectedModel}`);
@@ -220,7 +220,7 @@ app.post('/callback', async (req, res) => {
       });
     }catch(modelErr){
       // 主模型失敗，強制降級到 flash
-      console.warn(`⚠️模型 ${selectedModel} 呼叫失敗，自動降級至 agnes‑2.5‑flash`, modelErr.message);
+      console.warn(`⚠️模型 ${selectedModel} 呼叫失敗，自動降級至 agnes-2.5-flash`, modelErr.message);
       aiResponse = await aiClient.chat.completions.create({
         model: "agnes-2.5-flash",
         messages: [
