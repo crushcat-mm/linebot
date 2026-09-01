@@ -1,246 +1,397 @@
-const express = require('express');
-const { OpenAI } = require('openai');
-const line = require('@line/bot-sdk');
-const fs = require('fs');
-const path = require('path');
-const app = express();
-app.use(express.json());
+const express = require("express");
+const { OpenAI } = require("openai");
+const line = require("@line/bot-sdk");
+const fs = require("fs");
+const path = require("path");
 
-// ========== 管理員 ID 清單 ==========
+const app = express();
+app.use(express.json({ limit: "256kb" }));
+
+// ==================== 基本設定 ====================
+const PORT = process.env.PORT || 10000;
+const MODEL_NAME = process.env.AI_MODEL || "agnes-2.5-flash";
 const ADMIN_USER_LIST = [
   "Ubd8313c23ee1aaf9f794042649c176fe",
   "Ua25feb59dc428d5bdb78f0d44192dcd3"
 ];
-let globalAiSwitch = true;
-// 使用者對話記憶
-let chatMemory = {};
 
-// ========== 讀取prompts資料夾下全部TXT ==========
-let systemPrompt = "";
-const promptDir = path.join(__dirname, './prompts');
-try {
-  const fileList = fs.readdirSync(promptDir);
-  const txtFiles = fileList.filter(f => path.extname(f).toLowerCase() === '.txt');
-  for (const filename of txtFiles) {
-    const fullPath = path.join(promptDir, filename);
+let globalAiSwitch = true;
+const chatMemory = new Map();
+const processedEventIds = new Set();
+const configuredMemoryMessages = Number.parseInt(process.env.MAX_MEMORY_MESSAGES || "60", 10);
+const MAX_MEMORY_MESSAGES = Number.isFinite(configuredMemoryMessages)
+  ? Math.min(Math.max(configuredMemoryMessages, 20), 100)
+  : 60;
+const MAX_TRACKED_EVENTS = 1000;
+
+// ==================== 提示詞載入 ====================
+// 不依賴檔案系統回傳順序，明確保留三份提示的職責與優先層級。
+const PROMPT_FILES = [
+  { name: "customer.txt", label: "主要銷售規則與輸出規範" },
+  { name: "QA.txt", label: "QA 精確回答規則（優先於一般銷售規則）" },
+  { name: "Function Button.txt", label: "LINE 按鈕說明（不可視為真正工具）" }
+];
+
+function loadSystemPrompt() {
+  const promptDir = path.join(__dirname, "prompts");
+  const sections = [];
+
+  for (const file of PROMPT_FILES) {
+    const fullPath = path.join(promptDir, file.name);
     try {
-      const content = fs.readFileSync(fullPath, 'utf8');
-      systemPrompt += `\n===== ${filename} =====\n${content}\n`;
-      console.log(`已載入prompt檔案: ${filename}`);
-    } catch (errRead) {
-      console.warn(`⚠️跳過檔案 ${filename}，讀取失敗:`, errRead.message);
+      const content = fs.readFileSync(fullPath, "utf8").trim();
+      if (content) {
+        sections.push(
+          `===== ${file.name}｜${file.label} =====\n${content}`
+        );
+        console.log(`已載入 prompt 檔案：${file.name}`);
+      }
+    } catch (error) {
+      console.warn(`跳過 prompt 檔案 ${file.name}：${error.message}`);
     }
   }
-  if (systemPrompt.trim() === "") {
-    throw new Error("prompts資料夾沒有讀取到任何有效的txt內容");
+
+  if (sections.length === 0) {
+    throw new Error("prompts 資料夾沒有讀取到任何有效的 txt 內容");
   }
-} catch (err) {
-  console.warn("無法存取prompts資料夾，使用內建備用 prompt", err.message);
-  systemPrompt = "你是萌爪貓坊的專業線上客服，態度親切有禮，使用繁體中文簡潔回覆客人關於貓咪品種、預約、飼養須知、等相關問題。回答不要過長。";
+
+  return [
+    "【系統執行層】",
+    "你只能產生最終可交付的 LINE 客戶訊息；不要輸出思考、草稿或規則檢查過程。",
+    "QA.txt 的精確回答規則優先於一般銷售規則；customer.txt 負責銷售策略與輸出格式；Function Button.txt 只提供按鈕說明，不代表你真的擁有工具。",
+    "若需要移交真人，必須使用下方 customer.txt 定義的移交格式；管理員摘要由伺服器擷取，不得留在客戶可見文字中。",
+    ...sections
+  ].join("\n\n");
 }
 
-// ========== Agnes AI 客戶端 ==========
+let systemPrompt;
+try {
+  systemPrompt = loadSystemPrompt();
+} catch (error) {
+  console.error("提示詞載入失敗，使用備用規則：", error);
+  systemPrompt = "你是萌爪貓坊的專業線上客服，使用繁體中文簡潔回答。無法確認的庫存、個體細節、價格與預約資訊，請誠實告知由真人確認。";
+}
+
+// ==================== 外部服務 ====================
 const aiClient = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  baseURL: "https://apihub.agnes-ai.com/v1"
+  baseURL: process.env.OPENAI_API_BASE || "https://apihub.agnes-ai.com/v1"
 });
 
-// 封裝：通知全部管理員
-async function notifyAdmins(lineClient, userId, userRawText) {
-  for (const adminUid of ADMIN_USER_LIST) {
-    try {
-      await lineClient.pushMessage({
-        to: adminUid,
-        messages: [{
-          type: "text",
-          text: `🔔AI觸發移交真人\n使用者UID：${userId}\n使用者訊息：${userRawText}`
-        }]
-      });
-    } catch (e) {
-      console.error("管理員推播失敗 adminUid=", adminUid, e);
-    }
+function getLineClient() {
+  return new line.messagingApi.MessagingApiClient({
+    channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN
+  });
+}
+
+// ==================== UID 狀態與事件去重 ====================
+function getUserSession(userId) {
+  if (!chatMemory.has(userId)) {
+    chatMemory.set(userId, {
+      messages: [],
+      turns: 0,
+      handoverTriggered: false,
+      lastAction: "尚未開始對話",
+      lastHandoverReason: ""
+    });
+  }
+  return chatMemory.get(userId);
+}
+
+function rememberMessage(session, message) {
+  session.messages.push(message);
+  if (session.messages.length > MAX_MEMORY_MESSAGES) {
+    session.messages.splice(0, session.messages.length - MAX_MEMORY_MESSAGES);
   }
 }
 
-// ========== 四層防禦：移交通知判斷 ==========
+function markEventProcessed(event) {
+  const eventId = event.webhookEventId;
+  if (!eventId) return false;
+  if (processedEventIds.has(eventId)) return true;
+  processedEventIds.add(eventId);
+  if (processedEventIds.size > MAX_TRACKED_EVENTS) {
+    const first = processedEventIds.values().next().value;
+    processedEventIds.delete(first);
+  }
+  return false;
+}
+
+// ==================== 移交判斷與輸出解析 ====================
 function shouldTriggerAdminAlert(rawAiOutput) {
-  // 第二層：明確標記比對
   if (rawAiOutput.includes("<<trigger_admin_alert>>")) {
     return { triggered: true, reason: "標記觸發", stripMarker: true };
   }
+
   const text = rawAiOutput.toLowerCase();
-  // 第三層：組合關鍵字兜底（必須同時命中兩個正則，避免單詞誤觸發）
   const patterns = [
     [/通知/, /真人|小編|客服|專人|人員/],
     [/已為您|已經幫您|幫您|已幫您/, /通知|轉交|移交|安排|聯繫/],
     [/稍後|等等|很快|隨後|一會兒/, /聯繫|回覆|有人|人員|跟您|找您/],
     [/馬上|立刻|立即|趕快|這就/, /有人|小編|真人|專人|客服|人員/],
-    [/為您.*轉|幫您.*轉/, /真人|小編|客服|專人/],
+    [/為您.*轉|幫您.*轉/, /真人|小編|客服|專人/]
   ];
-  for (const [p1, p2] of patterns) {
-    if (p1.test(text) && p2.test(text)) {
+
+  for (const [first, second] of patterns) {
+    if (first.test(text) && second.test(text)) {
       return { triggered: true, reason: "關鍵字組合觸發", stripMarker: false };
     }
   }
+
   return { triggered: false, reason: "", stripMarker: false };
 }
 
-// ========== 完整句子截斷：避免回覆過長 ==========
+function parseAiOutput(rawOutput) {
+  const raw = String(rawOutput || "").trim();
+  const summaryMatch = raw.match(/<<admin_summary>>([\s\S]*?)<<end_admin_summary>>/i);
+  const adminSummary = summaryMatch ? summaryMatch[1].trim() : "";
+  const alert = shouldTriggerAdminAlert(raw);
+
+  let customerText = raw
+    // 完整標記或未閉合標記都不允許進入客戶訊息。
+    .replace(/<<admin_summary>>[\s\S]*?(?:<<end_admin_summary>>|$)/gi, "")
+    .replaceAll("<<trigger_admin_alert>>", "")
+    .trim();
+
+  if (!customerText) {
+    customerText = "這部分我請真人客服接續為您說明喔！";
+  }
+
+  return {
+    customerText,
+    adminSummary,
+    triggered: alert.triggered,
+    reason: alert.reason
+  };
+}
+
 function truncateToCompleteSentence(text, maxChars = 220, hardLimit = 350) {
   if (!text || text.length <= maxChars) return text;
-  // 從 maxChars 開始找第一個句末標點（。！？!?），在標點後截斷
   const punctuation = /[。！？!?]/;
-  let cutIndex = -1;
   const searchEnd = Math.min(text.length, hardLimit);
-  for (let i = maxChars; i < searchEnd; i++) {
-    if (punctuation.test(text[i])) {
-      cutIndex = i + 1;
+  let cutIndex = -1;
+
+  for (let index = maxChars; index < searchEnd; index += 1) {
+    if (punctuation.test(text[index])) {
+      cutIndex = index + 1;
       break;
     }
   }
-  if (cutIndex === -1) {
-    // 找不到標點，在 hardLimit 處硬截斷
-    cutIndex = Math.min(text.length, hardLimit);
-  }
-  return text.slice(0, cutIndex).trim() + "…";
+
+  if (cutIndex === -1) cutIndex = Math.min(text.length, hardLimit);
+  return `${text.slice(0, cutIndex).trim()}…`;
 }
 
-// ========== LINE Webhook ==========
-app.post('/callback', async (req, res) => {
-  const events = req.body.events;
-  if (!events || events.length === 0) {
-    return res.status(200).end();
-  }
-  
-  const event = events[0];
-  console.log("==== 完整事件資訊 ====", JSON.stringify(event, null, 2));
-  const userId = event.source.userId;
-  const lineClient = new line.messagingApi.MessagingApiClient({
-    channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN
-  });
+// ==================== LINE 傳送 ====================
+async function pushToAdmins(lineClient, userId, userRawText, summary, reason) {
+  const text = [
+    "🔔 AI 觸發移交真人",
+    `使用者 UID：${userId}`,
+    `移交原因：${reason || "模型判斷需真人接手"}`,
+    `使用者訊息：${userRawText}`,
+    summary ? `\n移交摘要：\n${summary}` : "\n移交摘要：模型未提供，請查看 LINE 對話紀錄。"
+  ].join("\n");
 
-  // 管理員指令區
-  if (event.type === 'message' && event.message.type === 'text') {
-    const msg = event.message.text.trim();
-    if (msg.startsWith('#') && ADMIN_USER_LIST.includes(userId)) {
-      if (msg === '#暫停') {
-        globalAiSwitch = false;
-        try {
-          await lineClient.pushMessage({
-            to: userId,
-            messages: [{ type: "text", text: "✅已全域關閉 AI 自動回覆，所有人交由人工處理。容器重啟會自動恢復開啟。" }]
-          });
-        } catch (e) { console.error("push 訊息失敗", e) }
-        return res.status(200).end();
-      }
-      if (msg === '#開始') {
-        globalAiSwitch = true;
-        try {
-          await lineClient.pushMessage({
-            to: userId,
-            messages: [{ type: "text", text: "✅已開啟 AI 自動回覆。" }]
-          });
-        } catch (e) { console.error("push 訊息失敗", e) }
-        return res.status(200).end();
-      }
-      if (msg === '#重啟') {
-        const oldCount = Object.keys(chatMemory).length;
-        chatMemory = {};
-        try {
-          await lineClient.pushMessage({
-            to: userId,
-            messages: [{
-              type: "text",
-              text: `✅聊天記憶已全部清空\n本次開機累計使用者紀錄數：${oldCount}\n伺服器本身不會重啟，僅重置對話緩存\n⚠️注意：prompts資料夾的txt修改，需要重啟伺服器才會生效`
-            }]
-          });
-        } catch (e) { console.error("push 訊息失敗", e) }
-        return res.status(200).end();
+  const results = await Promise.allSettled(
+    ADMIN_USER_LIST.map((adminUid) =>
+      lineClient.pushMessage({
+        to: adminUid,
+        messages: [{ type: "text", text: text.slice(0, 4900) }]
+      })
+    )
+  );
+
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.error("管理員推播失敗：", ADMIN_USER_LIST[index], result.reason);
+    }
+  });
+}
+
+async function sendCustomerReply(lineClient, event, text) {
+  const message = {
+    type: "text",
+    text: truncateToCompleteSentence(text)
+  };
+
+  try {
+    await lineClient.replyMessage({
+      replyToken: event.replyToken,
+      messages: [message]
+    });
+  } catch (replyError) {
+    console.error("LINE replyMessage 失敗：", {
+      message: replyError.message,
+      code: replyError.code,
+      eventId: event.webhookEventId
+    });
+
+    // reply token 失效時，改用 pushMessage，避免客戶只看到系統錯誤。
+    if (event.source?.userId) {
+      try {
+        await lineClient.pushMessage({
+          to: event.source.userId,
+          messages: [message]
+        });
+      } catch (pushError) {
+        console.error("LINE fallback pushMessage 失敗：", pushError.message);
       }
     }
   }
+}
 
-  // AI開關關閉直接結束
-  if (globalAiSwitch !== true) {
-    return res.status(200).end();
-  }
-  if (event.type !== 'message' || event.message.type !== 'text') {
-    return res.status(200).end();
+// ==================== 管理員指令 ====================
+async function handleAdminCommand(lineClient, userId, text) {
+  if (!ADMIN_USER_LIST.includes(userId) || !text.startsWith("#")) {
+    return false;
   }
 
-  const userText = event.message.text;
-  // 存入使用者訊息記憶
-  if (!chatMemory[userId]) {
-    chatMemory[userId] = [];
+  if (text === "#暫停") {
+    globalAiSwitch = false;
+    await lineClient.pushMessage({
+      to: userId,
+      messages: [{ type: "text", text: "✅已全域關閉 AI 自動回覆，所有人交由人工處理。容器重啟會自動恢復開啟。" }]
+    });
+    return true;
   }
-  chatMemory[userId].push({ role: "user", content: userText });
-  // 記憶長度防爆（保留最近 20 則歷史紀錄）
-  if (chatMemory[userId].length > 20) {
-    chatMemory[userId] = chatMemory[userId].slice(-20);
+
+  if (text === "#開始") {
+    globalAiSwitch = true;
+    await lineClient.pushMessage({
+      to: userId,
+      messages: [{ type: "text", text: "✅已開啟 AI 自動回覆。" }]
+    });
+    return true;
   }
+
+  if (text === "#重啟") {
+    const oldCount = chatMemory.size;
+    chatMemory.clear();
+    await lineClient.pushMessage({
+      to: userId,
+      messages: [{
+        type: "text",
+        text: `✅聊天記憶已全部清空\n本次開機累計使用者紀錄數：${oldCount}\n伺服器本身不會重啟，僅重置對話緩存\n⚠️注意：prompts 資料夾的 txt 修改，需要重啟伺服器才會生效`
+      }]
+    });
+    return true;
+  }
+
+  return false;
+}
+
+// ==================== AI 對話流程 ====================
+async function processTextEvent(event) {
+  const userId = event.source?.userId;
+  const userText = event.message?.text?.trim();
+  if (!userId || !userText) return;
+
+  const lineClient = getLineClient();
+  if (await handleAdminCommand(lineClient, userId, userText)) return;
+  if (!globalAiSwitch) return;
+
+  const session = getUserSession(userId);
+  const requesterRole = ADMIN_USER_LIST.includes(userId) ? "admin" : "customer";
+  rememberMessage(session, { role: "user", content: userText });
 
   try {
-    // 固定使用單一模型
-    const MODEL_NAME = "agnes-2.5-flash";
-    console.log(`[⚡ 快速模式] 使用模型: ${MODEL_NAME}`);
+    const stateContext = [
+      "【目前執行狀態，僅供判斷，不要原樣輸出】",
+      `requester_role: ${requesterRole}`,
+      `conversation_turn: ${session.turns + 1}`,
+      `handover_already_triggered: ${session.handoverTriggered ? "true" : "false"}`,
+      `last_action: ${session.lastAction}`,
+      "請依 customer.txt 的銷售流程處理本輪；若需要移交，依指定格式輸出。"
+    ].join("\n");
 
     const aiResponse = await aiClient.chat.completions.create({
       model: MODEL_NAME,
       messages: [
         { role: "system", content: systemPrompt },
-        ...chatMemory[userId]
+        { role: "system", content: stateContext },
+        ...session.messages
       ],
       temperature: 0.3,
       max_tokens: 350
     });
 
-    const rawAiOutput = aiResponse.choices[0]?.message?.content?.trim()
-      || "很抱歉，目前無法處理您的問題，請稍後再嘗試。";
-    console.log(`【AI原始輸出 - 來自 ${aiResponse.model}】`, JSON.stringify(rawAiOutput));
-
-    // 四層防禦：觸發移交通知判斷
-    let finalUserText = rawAiOutput;
-    const alertResult = shouldTriggerAdminAlert(rawAiOutput);
-    if (alertResult.triggered) {
-      console.log(`偵測到移交通知 [${alertResult.reason}]，通知管理員`);
-      await notifyAdmins(lineClient, userId, userText);
-      if (alertResult.stripMarker) {
-        finalUserText = finalUserText.replaceAll("<<trigger_admin_alert>>", "").trim();
-      }
+    const rawAiOutput = aiResponse.choices?.[0]?.message?.content;
+    if (typeof rawAiOutput !== "string" || !rawAiOutput.trim()) {
+      throw new Error("模型回傳沒有可用的文字內容");
     }
 
-    // 長度控制：超過120字在完整句子處截斷
-    finalUserText = truncateToCompleteSentence(finalUserText);
-    chatMemory[userId].push({ role: "assistant", content: finalUserText });
+    const parsed = parseAiOutput(rawAiOutput);
+    const visibleText = parsed.customerText.startsWith("萌爪小貓(AI)：")
+      ? parsed.customerText
+      : `萌爪小貓(AI)：\n\n${parsed.customerText}`;
+    const finalUserText = truncateToCompleteSentence(visibleText);
+    session.turns += 1;
+    session.lastAction = parsed.triggered ? "已觸發真人移交" : "已完成本輪回覆";
+    if (parsed.triggered) {
+      session.handoverTriggered = true;
+      session.lastHandoverReason = parsed.reason;
+    }
+    rememberMessage(session, { role: "assistant", content: finalUserText });
 
-    // 回覆訊息給 LINE 使用者
-    await lineClient.replyMessage({
-      replyToken: event.replyToken,
-      messages: [{
-        type: "text",
-        text: finalUserText
-      }]
+    // 先回覆客戶，移交推播在後台處理，不讓管理員通知拖住客戶回覆。
+    await sendCustomerReply(lineClient, event, finalUserText);
+
+    if (parsed.triggered) {
+      void pushToAdmins(
+        lineClient,
+        userId,
+        userText,
+        parsed.adminSummary,
+        parsed.reason
+      ).catch((error) => {
+        console.error("背景移交通知失敗：", error.message);
+      });
+    }
+  } catch (error) {
+    console.error("AI 回覆異常：", {
+      message: error.message,
+      code: error.code,
+      status: error.status,
+      userId,
+      eventId: event.webhookEventId
     });
 
-  } catch (error) {
-    console.error("AI 回覆異常:", error);
-    try {
-      await lineClient.replyMessage({
-        replyToken: event.replyToken,
-        messages: [{
-          type: "text",
-          text: "不好意思，系統暫時忙碌，請稍後再聯繫我們。"
-        }]
-      });
-    } catch (replyErr) {
-      console.error("錯誤提示發送失敗:", replyErr);
+    // 移除本輪未完成的 user 訊息，避免下一輪把壞狀態持續累積。
+    if (session.messages.at(-1)?.role === "user") {
+      session.messages.pop();
     }
-  }
 
+    await sendCustomerReply(
+      lineClient,
+      event,
+      "不好意思，系統暫時忙碌，請稍後再聯繫我們。"
+    );
+  }
+}
+
+async function processEvent(event) {
+  if (!event || markEventProcessed(event)) return;
+  if (event.type !== "message" || event.message?.type !== "text") return;
+  await processTextEvent(event);
+}
+
+// ==================== LINE Webhook ====================
+app.post("/callback", (req, res) => {
+  // 先確認 webhook，避免 LINE 等待模型、推播或回覆完成。
   res.status(200).end();
+
+  const event = req.body?.events?.[0];
+  if (!event) return;
+
+  processEvent(event).catch((error) => {
+    console.error("未處理的 webhook 例外：", error);
+  });
 });
 
-const PORT = process.env.PORT || 10000;
+app.get("/", (_req, res) => {
+  res.status(200).send("LINE bot is running");
+});
+
 app.listen(PORT, () => {
-  console.log(`貓坊客服機器人已啟動，運行端口: ${PORT}`);
+  console.log(`貓坊客服機器人已啟動，運行端口：${PORT}`);
 });
