@@ -10,6 +10,11 @@ app.use(express.json({ limit: "256kb" }));
 // ==================== 基本設定 ====================
 const PORT = process.env.PORT || 10000;
 const MODEL_NAME = process.env.AI_MODEL || "agnes-2.5-flash";
+const configuredMaxTokens = Number.parseInt(process.env.AI_MAX_TOKENS || "1024", 10);
+const AI_MAX_TOKENS = Number.isFinite(configuredMaxTokens)
+  ? Math.min(Math.max(configuredMaxTokens, 512), 2048)
+  : 1024;
+const ENABLE_THINKING = process.env.AGNES_ENABLE_THINKING === "true";
 const ADMIN_USER_LIST = [
   "Ubd8313c23ee1aaf9f794042649c176fe",
   "Ua25feb59dc428d5bdb78f0d44192dcd3"
@@ -330,6 +335,39 @@ async function handleAdminCommand(lineClient, userId, text) {
 }
 
 // ==================== AI 對話流程 ====================
+async function requestAiCompletion(messages) {
+  const request = {
+    model: MODEL_NAME,
+    messages,
+    temperature: 0.3,
+    max_tokens: AI_MAX_TOKENS,
+    chat_template_kwargs: {
+      enable_thinking: ENABLE_THINKING
+    }
+  };
+
+  const firstResponse = await aiClient.chat.completions.create(request);
+  const firstText = extractModelText(firstResponse);
+  const firstFinishReason = firstResponse.choices?.[0]?.finish_reason;
+
+  // 推理內容可能先耗盡輸出額度；只在「長度截斷且沒有最終文字」時重試一次。
+  if (!firstText && firstFinishReason === "length") {
+    console.warn("模型輸出因 length 截斷，使用較高輸出上限重試：", {
+      firstMaxTokens: AI_MAX_TOKENS,
+      response: summarizeModelResponseShape(firstResponse)
+    });
+    return aiClient.chat.completions.create({
+      ...request,
+      max_tokens: Math.min(AI_MAX_TOKENS * 2, 4096),
+      chat_template_kwargs: {
+        enable_thinking: false
+      }
+    });
+  }
+
+  return firstResponse;
+}
+
 async function processTextEvent(event) {
   const userId = event.source?.userId;
   const userText = event.message?.text?.trim();
@@ -353,16 +391,11 @@ async function processTextEvent(event) {
       "請依 customer.txt 的銷售流程處理本輪；若需要移交，依指定格式輸出。"
     ].join("\n");
 
-    const aiResponse = await aiClient.chat.completions.create({
-      model: MODEL_NAME,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "system", content: stateContext },
-        ...session.messages
-      ],
-      temperature: 0.3,
-      max_tokens: 350
-    });
+    const aiResponse = await requestAiCompletion([
+      { role: "system", content: systemPrompt },
+      { role: "system", content: stateContext },
+      ...session.messages
+    ]);
 
     const rawAiOutput = extractModelText(aiResponse);
     if (!rawAiOutput) {
@@ -414,7 +447,7 @@ async function processTextEvent(event) {
     await sendCustomerReply(
       lineClient,
       event,
-      "不好意思，系統暫時忙碌，請稍後再聯繫我們。"
+      "我收到你的訊息了～我先陪你了解適合的方向，想請問你比較喜歡哪種貓咪呢？"
     );
   }
 }
