@@ -141,6 +141,55 @@ function shouldTriggerAdminAlert(rawAiOutput) {
   return { triggered: false, reason: "", stripMarker: false };
 }
 
+function extractTextPart(value) {
+  if (typeof value === "string") return value.trim();
+  if (!Array.isArray(value)) return "";
+
+  return value
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      return part.text || part.content || part.value || "";
+    })
+    .filter((part) => typeof part === "string" && part.trim())
+    .join("\n")
+    .trim();
+}
+
+function extractModelText(aiResponse) {
+  const choice = aiResponse?.choices?.[0];
+  const message = choice?.message;
+  const candidates = [
+    message?.content,
+    choice?.text,
+    aiResponse?.output_text
+  ];
+
+  for (const candidate of candidates) {
+    const text = extractTextPart(candidate);
+    if (text) return text;
+  }
+
+  return "";
+}
+
+function summarizeModelResponseShape(aiResponse) {
+  const choice = aiResponse?.choices?.[0];
+  const message = choice?.message;
+  return {
+    id: aiResponse?.id,
+    model: aiResponse?.model,
+    choices: Array.isArray(aiResponse?.choices) ? aiResponse.choices.length : 0,
+    finishReason: choice?.finish_reason,
+    messageKeys: message && typeof message === "object" ? Object.keys(message) : [],
+    contentType: Array.isArray(message?.content) ? "array" : typeof message?.content,
+    contentLength: typeof message?.content === "string" ? message.content.length : undefined,
+    hasToolCalls: Array.isArray(message?.tool_calls) && message.tool_calls.length > 0,
+    hasRefusal: Boolean(message?.refusal),
+    hasOutputText: typeof aiResponse?.output_text === "string"
+  };
+}
+
 function parseAiOutput(rawOutput) {
   const raw = String(rawOutput || "").trim();
   const summaryMatch = raw.match(/<<admin_summary>>([\s\S]*?)<<end_admin_summary>>/i);
@@ -153,8 +202,8 @@ function parseAiOutput(rawOutput) {
     .replaceAll("<<trigger_admin_alert>>", "")
     .trim();
 
-  if (!customerText) {
-    customerText = "這部分我請真人客服接續為您說明喔！";
+  if (!customerText || customerText.length === 1) {
+    customerText = "我在喔～想先了解您比較喜歡哪種貓咪呢？";
   }
 
   return {
@@ -315,8 +364,9 @@ async function processTextEvent(event) {
       max_tokens: 350
     });
 
-    const rawAiOutput = aiResponse.choices?.[0]?.message?.content;
-    if (typeof rawAiOutput !== "string" || !rawAiOutput.trim()) {
+    const rawAiOutput = extractModelText(aiResponse);
+    if (!rawAiOutput) {
+      console.error("模型回應格式無可用文字：", summarizeModelResponseShape(aiResponse));
       throw new Error("模型回傳沒有可用的文字內容");
     }
 
