@@ -1,13 +1,19 @@
 {
   "name": "line-customer-service-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "description": "萌爪貓坊 LINE 售前客服機器人",
   "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js"
+  },
   "dependencies": {
     "@line/bot-sdk": "^9.4.0",
     "express": "^4.19.2",
     "openai": "^4.56.0"
-  },
-  "scripts": {
-    "start": "node index.js"
   }
 }
