@@ -97,7 +97,14 @@ function getUserSession(userId) {
       turns: 0,
       handoverTriggered: false,
       lastAction: "尚未開始對話",
-      lastHandoverReason: ""
+      lastHandoverReason: "",
+      leadSignals: {
+        breeds: [],
+        colors: [],
+        budget: "",
+        timing: "",
+        preferences: []
+      }
     });
   }
   return chatMemory.get(userId);
@@ -136,16 +143,34 @@ function shouldTriggerAdminAlert(rawAiOutput) {
 function detectCustomerHandoverIntent(userText) {
   const text = String(userText || "").toLowerCase();
   const directHuman = /找真人|真人客服|人工客服|不要ai|不要跟ai|找老闆|找老板|找小編|找客服|專人處理/.test(text);
-  const complaint = /投訴|投诉|客訴|不滿|不爽|爭議|騙人|詐騙|態度很差/.test(text);
+  const brandConflict = /爛貓舍|爛貓坊|病貓|抵制|曝光|負評|申訴|黑店|騙人|詐騙|欺騙|不合理|誰承擔|承擔風險|激化矛盾|故意|不敢買|後悔|失望|垃圾|白癡|智障/.test(text);
+  const complaint = /投訴|投诉|客訴|不滿|不爽|爭議|態度很差|太誇張|很生氣|很火大/.test(text);
   const transaction = /分期|刷卡|付款|下單|下订|帶回家|带回家|成交/.test(text);
   const specificAction = /(這隻|那隻|照片|影片|這一隻|那一隻)/.test(text)
     && /多少|價格|价钱|還在|还有|庫存|库存|預約|预约|保留|留到/.test(text);
 
   if (directHuman) return { triggered: true, reason: "顧客明確要求真人" };
-  if (complaint) return { triggered: true, reason: "顧客情緒或爭議" };
+  if (brandConflict || complaint) return { triggered: true, reason: "顧客品牌、健康信任或情緒爭議" };
   if (specificAction) return { triggered: true, reason: "顧客詢問特定個體交易資訊" };
   if (transaction) return { triggered: true, reason: "顧客出現交易訊號" };
   return { triggered: false, reason: "" };
+}
+
+function updateLeadSignals(session, userText) {
+  const text = String(userText || "");
+  const signal = session.leadSignals;
+  const breedPattern = /英短|英國短毛|美短|美國短毛|布偶|緬因|缅因|摺耳|折耳|暹羅|孟買|波斯|金吉拉|無毛|无毛|米克斯|橘貓|橘猫|小步舞曲|拿破崙|塞爾凱克|德文|捲耳|卷耳|捲毛|卷毛|American\s*Curl|Selkirk|Devon\s*Rex|Minuet/gi;
+  const colorPattern = /藍白|藍貓|金漸層|銀漸層|海豹雙色|重點色|虎斑|玳瑁|純白|黑色|橘色|奶油色|三花/gi;
+  const breedMatches = text.match(breedPattern) || [];
+  const colorMatches = text.match(colorPattern) || [];
+  signal.breeds = [...new Set([...signal.breeds, ...breedMatches])].slice(-8);
+  signal.colors = [...new Set([...signal.colors, ...colorMatches])].slice(-8);
+  const budget = text.match(/(?:預算|预算|大約|大概|約|抓|只有)?\s*(\d+(?:\.\d+)?)\s*(萬|千|元)/i);
+  if (budget) signal.budget = budget[0].trim();
+  const timing = text.match(/今天|明天|這週|本週|下週|這個月|下個月|近期|最近|月底|年後|明年|先看看|再看看/i);
+  if (timing) signal.timing = timing[0];
+  const preferenceMatches = text.match(/可以帶出門|適合公寓|親人|黏人|安靜|好照顧|短毛|長毛|捲毛|無毛|第一次養貓/gi) || [];
+  signal.preferences = [...new Set([...signal.preferences, ...preferenceMatches])].slice(-8);
 }
 
 function isIdentityQuestion(userText) {
@@ -279,11 +304,11 @@ function truncateToCompleteSentence(text, maxChars = 220, hardLimit = 350) {
 }
 
 // ==================== LINE 傳送 ====================
-async function pushToAdmins(lineClient, userId, userRawText, summary, reason) {
+async function pushToAdmins(lineClient, userId, userRawText, summary, reason, requesterRole = "customer") {
   const text = [
     "🔔 AI 觸發移交真人",
     `使用者 UID：${userId}`,
-    `移交原因：${reason || "模型判斷需真人接手"}`,
+    `移交原因：${requesterRole === "admin" ? "[管理員測試] " : ""}${reason || "模型判斷需真人接手"}`,
     `使用者訊息：${userRawText}`,
     summary ? `\n移交摘要：\n${summary}` : "\n移交摘要：模型未提供，請查看 LINE 對話紀錄。"
   ].join("\n");
@@ -419,7 +444,9 @@ async function processTextEvent(event) {
   if (await handleAdminCommand(lineClient, userId, userText)) return;
   if (!globalAiSwitch) return;
 
-  const session = getUserSession(userId);
+    const session = getUserSession(userId);
+  const requesterRole = ADMIN_USER_LIST.includes(userId) ? "admin" : "customer";
+  updateLeadSignals(session, userText);
 
   // 身份問題使用固定安全回答，避免模型自行補出開發者或供應商名稱。
   if (isIdentityQuestion(userText)) {
@@ -437,7 +464,6 @@ async function processTextEvent(event) {
     await sendCustomerReply(lineClient, event, identityReply);
     return;
   }
-  const requesterRole = ADMIN_USER_LIST.includes(userId) ? "admin" : "customer";
   rememberMessage(session, { role: "user", content: userText });
 
   try {
@@ -447,6 +473,7 @@ async function processTextEvent(event) {
       `conversation_turn: ${session.turns + 1}`,
       `handover_already_triggered: ${session.handoverTriggered ? "true" : "false"}`,
       `last_action: ${session.lastAction}`,
+      `lead_signals: ${JSON.stringify(session.leadSignals)}`,
       "請依 customer.txt 的銷售流程處理本輪；若需要移交，依指定格式輸出。"
     ].join("\n");
 
@@ -473,9 +500,15 @@ async function processTextEvent(event) {
 
     const userTrigger = detectCustomerHandoverIntent(userText);
     const technicalIssue = isTechnicalIssueReport(userText);
+
+    // 品牌／健康信任爭議不能交給模型自由發揮，直接使用一次性安撫與真人接手話術。
+    if (userTrigger.reason === "顧客品牌、健康信任或情緒爭議") {
+      parsed.customerText = "我了解您的疑慮，剛才的說明讓您感覺我們只是在強調風險，沒有先說清楚健康把關流程。父母貓繁育前會安排健康檢查，幼貓交付前也會再次確認；這部分我先請真人客服完整向您說明。";
+    }
     // 技術異常回報與要求真人是兩件事；模型誤加移交標記時，不能直接通知為一般銷售移交。
         const requestedHandover = userTrigger.triggered || (parsed.triggered && !technicalIssue);
-    const triggered = requesterRole === "customer" && requestedHandover;
+    // 管理員也是測試者：觸發移交時仍推播，通知內會標示「管理員測試」。
+    const triggered = requestedHandover;
     const handoverReason = userTrigger.reason || (technicalIssue ? "" : parsed.reason);
 
     const visibleText = parsed.customerText.startsWith("萌爪小貓(AI)：")
@@ -500,7 +533,8 @@ async function processTextEvent(event) {
         userId,
         userText,
         parsed.adminSummary,
-        handoverReason
+        handoverReason,
+        requesterRole
       ).catch((error) => {
         console.error("背景移交通知失敗：", error.message);
       });
