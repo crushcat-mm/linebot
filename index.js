@@ -207,11 +207,17 @@ function summarizeModelResponseShape(aiResponse) {
 }
 
 function isGeneralPriceQuestion(userText) {
-  return /貓咪.*(多少錢|多少|價格|价钱|行情)|多少錢.*貓|價格.*貓|价钱.*猫/.test(String(userText || ""));
+  return /貓咪.*(多少錢|多少|價格|价钱|行情)|多少錢.*貓|價格.*貓|价钱.*猫|英短.*(多少錢|價格|行情)|英國短毛.*(多少錢|價格|行情)|美短.*(多少錢|價格|行情)|布偶.*(多少錢|價格|行情)|緬因.*(多少錢|價格|行情)|缅因.*(多少錢|價格|行情)|德文.*(多少錢|價格|行情)|塞爾凱克.*(多少錢|價格|行情)|小步舞曲.*(多少錢|價格|行情)/.test(String(userText || ""));
+}
+
+function isSpecificIndividualPriceQuestion(userText) {
+  const text = String(userText || "");
+  return /(這隻|那隻|這一隻|那一隻|照片裡|影片裡|編號|名字)/.test(text)
+    && /(多少錢|價格|價錢|价钱|行情)/.test(text);
 }
 
 function hasBreedContext(text) {
-  return /英短|英國短毛|美短|美國短毛|布偶|緬因|缅因|摺耳|折耳|蘇格蘭|暹羅|孟買|波斯|金吉拉|無毛|无毛|挪威森林|米克斯|橘貓|橘猫|賓士|豹貓/.test(String(text || ""));
+  return /英短|英國短毛|美短|美國短毛|布偶|緬因|缅因|摺耳|折耳|蘇格蘭|暹羅|孟買|波斯|金吉拉|無毛|无毛|挪威森林|米克斯|橘貓|橘猫|賓士|豹貓|小步舞曲|拿破崙|塞爾凱克|德文|捲耳|卷耳|捲毛|卷毛|American\s*Curl|Selkirk|Devon\s*Rex|Minuet/.test(String(text || ""));
 }
 
 function cleanCustomerText(text) {
@@ -219,8 +225,10 @@ function cleanCustomerText(text) {
     .replace(/^(?:\s*`?\s*萌爪小貓\(AI\)：\s*`?\s*)+/i, "")
     .replace(/\*\*/g, "")
     .replace(/^\s*`+\s*$/gm, "")
-    .replace(/^\s*[-*]\s+/gm, "")
+        .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/^\s*[▫▪•]\s+/gm, "")
     .replace(/^\s*#+\s+/gm, "")
+
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -456,24 +464,28 @@ async function processTextEvent(event) {
 
     let parsed = parseAiOutput(rawAiOutput);
     const recentContext = session.messages.map((message) => message.content).join("\n");
-    if (isGeneralPriceQuestion(userText) && !hasBreedContext(`${recentContext}\n${userText}`)) {
+        if (isGeneralPriceQuestion(userText) && !isSpecificIndividualPriceQuestion(userText)) {
       parsed = {
         ...parsed,
         customerText: "以萌爪貓坊過去的歷史成交經驗來看，正常品種貓大約落在 3 萬至 16 萬元左右。\n\n這不是每個品種的固定價格，實際仍會依品種、毛色、血統、年齡與個體條件不同；如果您有偏好的品種，我可以先幫您介紹方向。"
       };
     }
+
     const userTrigger = detectCustomerHandoverIntent(userText);
     const technicalIssue = isTechnicalIssueReport(userText);
     // 技術異常回報與要求真人是兩件事；模型誤加移交標記時，不能直接通知為一般銷售移交。
-    const triggered = userTrigger.triggered || (parsed.triggered && !technicalIssue);
+        const requestedHandover = userTrigger.triggered || (parsed.triggered && !technicalIssue);
+    const triggered = requesterRole === "customer" && requestedHandover;
     const handoverReason = userTrigger.reason || (technicalIssue ? "" : parsed.reason);
+
     const visibleText = parsed.customerText.startsWith("萌爪小貓(AI)：")
       ? parsed.customerText
       : `萌爪小貓(AI)：\n\n${parsed.customerText}`;
     const finalUserText = truncateToCompleteSentence(visibleText);
     session.turns += 1;
-    session.lastAction = triggered ? "已觸發真人移交" : "已完成本輪回覆";
+        session.lastAction = triggered ? "已觸發真人移交" : (requesterRole === "admin" ? "管理員測試回覆" : "已完成本輪回覆");
     if (triggered) {
+
       session.handoverTriggered = true;
       session.lastHandoverReason = handoverReason;
     }
