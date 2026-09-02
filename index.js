@@ -459,7 +459,7 @@ async function processTextEvent(event) {
     if (isGeneralPriceQuestion(userText) && !hasBreedContext(`${recentContext}\n${userText}`)) {
       parsed = {
         ...parsed,
-        customerText: "以萌爪貓坊過去的歷史成交經驗來看，正常品種貓大約落在 2 萬至 16 萬元左右。\n\n這不是每個品種的固定價格，實際仍會依品種、毛色、血統、年齡與個體條件不同；如果您有偏好的品種，我可以先幫您介紹方向。"
+        customerText: "以萌爪貓坊過去的歷史成交經驗來看，正常品種貓大約落在 3 萬至 16 萬元左右。\n\n這不是每個品種的固定價格，實際仍會依品種、毛色、血統、年齡與個體條件不同；如果您有偏好的品種，我可以先幫您介紹方向。"
       };
     }
     const userTrigger = detectCustomerHandoverIntent(userText);
