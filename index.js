@@ -125,25 +125,31 @@ function markEventProcessed(event) {
 // ==================== 移交判斷與輸出解析 ====================
 function shouldTriggerAdminAlert(rawAiOutput) {
   if (rawAiOutput.includes("<<trigger_admin_alert>>")) {
-    return { triggered: true, reason: "標記觸發", stripMarker: true };
+    return { triggered: true, reason: "模型明確標記移交", stripMarker: true };
   }
 
-  const text = rawAiOutput.toLowerCase();
-  const patterns = [
-    [/通知/, /真人|小編|客服|專人|人員/],
-    [/已為您|已經幫您|幫您|已幫您/, /通知|轉交|移交|安排|聯繫/],
-    [/稍後|等等|很快|隨後|一會兒/, /聯繫|回覆|有人|人員|跟您|找您/],
-    [/馬上|立刻|立即|趕快|這就/, /有人|小編|真人|專人|客服|人員/],
-    [/為您.*轉|幫您.*轉/, /真人|小編|客服|專人/]
-  ];
-
-  for (const [first, second] of patterns) {
-    if (first.test(text) && second.test(text)) {
-      return { triggered: true, reason: "關鍵字組合觸發", stripMarker: false };
-    }
-  }
-
+  // AI 客戶正文提到「可轉真人」只是服務說明，不代表顧客要求移交。
+  // 真正的文字意圖由 detectCustomerHandoverIntent(userText) 另行判斷。
   return { triggered: false, reason: "", stripMarker: false };
+}
+
+function detectCustomerHandoverIntent(userText) {
+  const text = String(userText || "").toLowerCase();
+  const directHuman = /找真人|真人客服|人工客服|不要ai|不要跟ai|找老闆|找老板|找小編|找客服|專人處理/.test(text);
+  const complaint = /投訴|投诉|客訴|不滿|不爽|爭議|騙人|詐騙|態度很差/.test(text);
+  const transaction = /分期|刷卡|付款|下單|下订|帶回家|带回家|成交/.test(text);
+  const specificAction = /(這隻|那隻|照片|影片|這一隻|那一隻)/.test(text)
+    && /多少|價格|价钱|還在|还有|庫存|库存|預約|预约|保留|留到/.test(text);
+
+  if (directHuman) return { triggered: true, reason: "顧客明確要求真人" };
+  if (complaint) return { triggered: true, reason: "顧客情緒或爭議" };
+  if (specificAction) return { triggered: true, reason: "顧客詢問特定個體交易資訊" };
+  if (transaction) return { triggered: true, reason: "顧客出現交易訊號" };
+  return { triggered: false, reason: "" };
+}
+
+function isIdentityQuestion(userText) {
+  return /你是誰|你是谁|你們是誰|你们是谁|你是哪家|你是哪間/.test(String(userText || ""));
 }
 
 function extractTextPart(value) {
@@ -378,6 +384,23 @@ async function processTextEvent(event) {
   if (!globalAiSwitch) return;
 
   const session = getUserSession(userId);
+
+  // 身份問題使用固定安全回答，避免模型自行補出開發者或供應商名稱。
+  if (isIdentityQuestion(userText)) {
+    const identityReply = `萌爪小貓(AI)：
+
+我是萌爪貓坊的線上售前顧問，
+可以先陪您了解適合的貓咪方向。
+
+如果您有喜歡的品種或需求，
+都可以直接跟我說喔～`;
+    rememberMessage(session, { role: "user", content: userText });
+    rememberMessage(session, { role: "assistant", content: identityReply });
+    session.turns += 1;
+    session.lastAction = "已回答身份問題";
+    await sendCustomerReply(lineClient, event, identityReply);
+    return;
+  }
   const requesterRole = ADMIN_USER_LIST.includes(userId) ? "admin" : "customer";
   rememberMessage(session, { role: "user", content: userText });
 
@@ -404,28 +427,31 @@ async function processTextEvent(event) {
     }
 
     const parsed = parseAiOutput(rawAiOutput);
+    const userTrigger = detectCustomerHandoverIntent(userText);
+    const triggered = parsed.triggered || userTrigger.triggered;
+    const handoverReason = parsed.reason || userTrigger.reason;
     const visibleText = parsed.customerText.startsWith("萌爪小貓(AI)：")
       ? parsed.customerText
       : `萌爪小貓(AI)：\n\n${parsed.customerText}`;
     const finalUserText = truncateToCompleteSentence(visibleText);
     session.turns += 1;
-    session.lastAction = parsed.triggered ? "已觸發真人移交" : "已完成本輪回覆";
-    if (parsed.triggered) {
+    session.lastAction = triggered ? "已觸發真人移交" : "已完成本輪回覆";
+    if (triggered) {
       session.handoverTriggered = true;
-      session.lastHandoverReason = parsed.reason;
+      session.lastHandoverReason = handoverReason;
     }
     rememberMessage(session, { role: "assistant", content: finalUserText });
 
     // 先回覆客戶，移交推播在後台處理，不讓管理員通知拖住客戶回覆。
     await sendCustomerReply(lineClient, event, finalUserText);
 
-    if (parsed.triggered) {
+    if (triggered) {
       void pushToAdmins(
         lineClient,
         userId,
         userText,
         parsed.adminSummary,
-        parsed.reason
+        handoverReason
       ).catch((error) => {
         console.error("背景移交通知失敗：", error.message);
       });
