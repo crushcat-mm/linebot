@@ -152,6 +152,11 @@ function isIdentityQuestion(userText) {
   return /你是誰|你是谁|你們是誰|你们是谁|你是哪家|你是哪間/.test(String(userText || ""));
 }
 
+function isTechnicalIssueReport(userText) {
+  const text = String(userText || "").toLowerCase();
+  return /重複|重复|兩次|两次|同一句|同一句話|顯示異常|显示异常|系統問題|系统问题|錯誤|错误|故障|為什麼要傳兩次|为什么要传两次/.test(text);
+}
+
 function extractTextPart(value) {
   if (typeof value === "string") return value.trim();
   if (!Array.isArray(value)) return "";
@@ -211,6 +216,8 @@ function parseAiOutput(rawOutput) {
     // 完整標記或未閉合標記都不允許進入客戶訊息。
     .replace(/<<admin_summary>>[\s\S]*?(?:<<end_admin_summary>>|$)/gi, "")
     .replaceAll("<<trigger_admin_alert>>", "")
+    // 模型有時會自行加上前綴或 Markdown 反引號；由程式統一只保留一個前綴。
+    .replace(/^(?:\s*`?\s*萌爪小貓\(AI\)：\s*`?\s*)+/i, "")
     .trim();
 
   if (!customerText || customerText.length === 1) {
@@ -428,8 +435,10 @@ async function processTextEvent(event) {
 
     const parsed = parseAiOutput(rawAiOutput);
     const userTrigger = detectCustomerHandoverIntent(userText);
-    const triggered = parsed.triggered || userTrigger.triggered;
-    const handoverReason = parsed.reason || userTrigger.reason;
+    const technicalIssue = isTechnicalIssueReport(userText);
+    // 技術異常回報與要求真人是兩件事；模型誤加移交標記時，不能直接通知為一般銷售移交。
+    const triggered = userTrigger.triggered || (parsed.triggered && !technicalIssue);
+    const handoverReason = userTrigger.reason || (technicalIssue ? "" : parsed.reason);
     const visibleText = parsed.customerText.startsWith("萌爪小貓(AI)：")
       ? parsed.customerText
       : `萌爪小貓(AI)：\n\n${parsed.customerText}`;
