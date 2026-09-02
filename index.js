@@ -206,6 +206,25 @@ function summarizeModelResponseShape(aiResponse) {
   };
 }
 
+function isGeneralPriceQuestion(userText) {
+  return /貓咪.*(多少錢|多少|價格|价钱|行情)|多少錢.*貓|價格.*貓|价钱.*猫/.test(String(userText || ""));
+}
+
+function hasBreedContext(text) {
+  return /英短|英國短毛|美短|美國短毛|布偶|緬因|缅因|摺耳|折耳|蘇格蘭|暹羅|孟買|波斯|金吉拉|無毛|无毛|挪威森林|米克斯|橘貓|橘猫|賓士|豹貓/.test(String(text || ""));
+}
+
+function cleanCustomerText(text) {
+  return String(text || "")
+    .replace(/^(?:\s*`?\s*萌爪小貓\(AI\)：\s*`?\s*)+/i, "")
+    .replace(/\*\*/g, "")
+    .replace(/^\s*`+\s*$/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/^\s*#+\s+/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function parseAiOutput(rawOutput) {
   const raw = String(rawOutput || "").trim();
   const summaryMatch = raw.match(/<<admin_summary>>([\s\S]*?)<<end_admin_summary>>/i);
@@ -219,6 +238,8 @@ function parseAiOutput(rawOutput) {
     // 模型有時會自行加上前綴或 Markdown 反引號；由程式統一只保留一個前綴。
     .replace(/^(?:\s*`?\s*萌爪小貓\(AI\)：\s*`?\s*)+/i, "")
     .trim();
+
+  customerText = cleanCustomerText(customerText);
 
   if (!customerText || customerText.length === 1) {
     customerText = "我在喔～想先了解您比較喜歡哪種貓咪呢？";
@@ -433,7 +454,14 @@ async function processTextEvent(event) {
       throw new Error("模型回傳沒有可用的文字內容");
     }
 
-    const parsed = parseAiOutput(rawAiOutput);
+    let parsed = parseAiOutput(rawAiOutput);
+    const recentContext = session.messages.map((message) => message.content).join("\n");
+    if (isGeneralPriceQuestion(userText) && !hasBreedContext(`${recentContext}\n${userText}`)) {
+      parsed = {
+        ...parsed,
+        customerText: "以萌爪貓坊過去的歷史成交經驗來看，正常品種貓大約落在 2 萬至 16 萬元左右。\n\n這不是每個品種的固定價格，實際仍會依品種、毛色、血統、年齡與個體條件不同；如果您有偏好的品種，我可以先幫您介紹方向。"
+      };
+    }
     const userTrigger = detectCustomerHandoverIntent(userText);
     const technicalIssue = isTechnicalIssueReport(userText);
     // 技術異常回報與要求真人是兩件事；模型誤加移交標記時，不能直接通知為一般銷售移交。
